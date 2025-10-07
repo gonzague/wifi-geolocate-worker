@@ -11,6 +11,7 @@
 - 🎯 Computes a weighted-centroid estimate when multiple signals are supplied
 - 🔄 Falls back to Cloudflare's IP-based geolocation when Apple returns nothing
 - 🗺️ Reverse geocoding - converts coordinates to human-readable addresses (optional)
+- 🔄 Smart auto-upgrade - automatically retries with `all=true` if no results found
 
 ## 📋 Prerequisites
 - **Node.js 18+** - Required to run Wrangler CLI. Install from [nodejs.org](https://nodejs.org/) or use a version manager like [Volta](https://volta.sh/) or [nvm](https://github.com/nvm-sh/nvm)
@@ -167,6 +168,80 @@ When Apple returns no usable coordinates, `found` is `false` and the response in
 - Validation failures return HTTP 400 with an `error` message.
 - Upstream problems with Apple result in HTTP 502 and an explanatory `error` payload.
 - `address` field is only included in results when `reverseGeocode=true` is specified.
+- When `all=false` returns no results, the system automatically retries with `all=true` and sets `autoUpgraded: true` in the response.
+
+## 🔄 Smart Auto-Upgrade
+
+When you query with `all=false` (or omit the parameter), the worker first attempts to find the exact BSSID you requested. If Apple doesn't have that specific BSSID in their database, the worker automatically retries with `all=true` to find nearby access points.
+
+**How it works:**
+1. Initial query with your `all` preference (default: `false`)
+2. If no results found and `all=false`, automatically retry with `all=true`
+3. If results found after retry, response includes `autoUpgraded: true`
+
+**Example:**
+```bash
+# Query for a BSSID not in Apple's database
+GET /?bssid=f8:ab:05:03:e9:40&all=false
+
+# Response includes nearby access points and indicates auto-upgrade
+{
+  "query": {
+    "accessPoints": [{"bssid": "f8:ab:05:03:e9:40", "signal": null}],
+    "all": true  // ← Upgraded from false
+  },
+  "found": true,
+  "autoUpgraded": true,  // ← Indicates automatic retry occurred
+  "results": [ /* nearby access points */ ]
+}
+```
+
+This feature improves the user experience by automatically providing useful results even when the exact BSSID isn't available.
+
+## 🗺️ Reverse Geocoding Behavior
+
+When `reverseGeocode=true` is specified, the worker intelligently decides which coordinates to geocode:
+
+**Smart Geocoding Strategy:**
+
+1. **Triangulated location exists** (multiple BSSIDs with signal strengths):
+   - ✅ Only the **triangulated position** gets geocoded
+   - ❌ Individual access points do NOT get geocoded
+   - 🎯 Most accurate: The weighted centroid represents your actual location
+
+2. **No triangulation** (single BSSID or no signals):
+   - **Exact matches**: If your requested BSSID(s) are found, only those get geocoded
+   - **No exact matches**: Only the first result gets geocoded
+   - **Multiple requests**: All exact matches get geocoded
+
+**Why this matters:**
+- ✅ Geocodes the **most relevant location** (triangulated position when available)
+- ✅ Respects Nominatim's 1 request/second rate limit
+- ✅ Fast responses (~1 second instead of ~10+ seconds)
+- ✅ Avoids redundant API calls (nearby APs often share the same address)
+- ✅ Provides meaningful location context
+
+**Examples:**
+```bash
+# With triangulation: Only triangulated location gets address
+POST / {
+  "accessPoints": [
+    {"bssid": "aa:bb:cc:dd:ee:f1", "signal": -52},
+    {"bssid": "aa:bb:cc:dd:ee:f2", "signal": -60},
+    {"bssid": "aa:bb:cc:dd:ee:f3", "signal": -45}
+  ],
+  "reverseGeocode": true
+}
+# → 3 results (no addresses), triangulated object has address ✅
+
+# Without triangulation: Exact match gets address
+GET /?bssid=34:49:5b:af:62:f5&reverseGeocode=true
+# → 1 result with address data
+
+# No exact match (auto-upgraded): First result gets address
+GET /?bssid=unknown:bssid&all=false&reverseGeocode=true
+# → 6 nearby results, only first has address data
+```
 
 ## 📝 Data Notes
 - BSSIDs are normalised to lowercase colon-separated hex (e.g., `aa:bb:cc:dd:ee:ff`).

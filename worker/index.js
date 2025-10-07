@@ -21,8 +21,23 @@ export default {
         signal: normalizeSignal(point.signal),
       }));
       const uniqueAccessPoints = Array.from(new Map(accessPoints.map((point) => [point.bssid, point])).values());
-      const parsedDevices = await collectAppleDevices(uniqueAccessPoints, includeAll);
-      const formatted = await formatResults(parsedDevices, accessPoints, includeAll, reverseGeocode);
+      
+      // First attempt with the user's includeAll preference
+      let parsedDevices = await collectAppleDevices(uniqueAccessPoints, includeAll);
+      let formatted = await formatResults(parsedDevices, accessPoints, includeAll, reverseGeocode);
+      
+      // Auto-upgrade: If not found and user specified all=false, retry with all=true
+      if (!formatted.found && !includeAll) {
+        parsedDevices = await collectAppleDevices(uniqueAccessPoints, true);
+        formatted = await formatResults(parsedDevices, accessPoints, true, reverseGeocode);
+        
+        // Mark that we auto-upgraded
+        if (formatted.found) {
+          formatted.autoUpgraded = true;
+          formatted.query.all = true;
+        }
+      }
+      
       const fallback = extractIpFallback(request.cf);
       if (!formatted.found && fallback) {
         formatted.fallback = fallback;
@@ -443,14 +458,6 @@ async function formatResults(devices, requestedAccessPoints, includeAll, shouldR
       ...(summary ? summary : {}),
     };
 
-    // Add reverse geocoding if requested
-    if (shouldReverseGeocode) {
-      const address = await reverseGeocode(latitude, longitude);
-      if (address) {
-        result.address = address;
-      }
-    }
-
     aggregatedResults.push(result);
 
     const weight = signals.reduce((total, signal) => total + weightFromSignal(signal), 0);
@@ -482,6 +489,51 @@ async function formatResults(devices, requestedAccessPoints, includeAll, shouldR
       method: 'weighted-centroid',
       signalWeightModel: '10^(dBm/10)',
     };
+  }
+
+  // Smart reverse geocoding strategy
+  if (shouldReverseGeocode && results.length > 0) {
+    if (triangulated) {
+      // When we have a triangulated location, geocode that (most accurate position)
+      const address = await reverseGeocode(triangulated.latitude, triangulated.longitude);
+      if (address) {
+        response.triangulated.address = address;
+      }
+    } else {
+      // No triangulation: use the old strategy (geocode requested BSSIDs or first result)
+      const requestedBssids = new Set(requestedAccessPoints.map(ap => ap.bssid));
+      let hasExactMatch = false;
+      
+      // First pass: Check if we have any exact matches
+      for (const result of results) {
+        if (requestedBssids.has(result.bssid)) {
+          hasExactMatch = true;
+          break;
+        }
+      }
+      
+      // Second pass: Geocode appropriately
+      for (const result of results) {
+        const isExactMatch = requestedBssids.has(result.bssid);
+        
+        if (hasExactMatch) {
+          // If we have exact matches, only geocode those
+          if (isExactMatch) {
+            const address = await reverseGeocode(result.latitude, result.longitude);
+            if (address) {
+              result.address = address;
+            }
+          }
+        } else {
+          // No exact matches: geocode only the first result
+          const address = await reverseGeocode(result.latitude, result.longitude);
+          if (address) {
+            result.address = address;
+          }
+          break; // Only geocode the first one
+        }
+      }
+    }
   }
 
   return response;
