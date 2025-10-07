@@ -15,14 +15,14 @@ class AppleServiceError extends Error {
 export default {
   async fetch(request) {
     try {
-      const { accessPoints: rawAccessPoints, includeAll } = await extractParams(request);
+      const { accessPoints: rawAccessPoints, includeAll, reverseGeocode } = await extractParams(request);
       const accessPoints = rawAccessPoints.map((point) => ({
         bssid: normalizeBssid(point.bssid),
         signal: normalizeSignal(point.signal),
       }));
       const uniqueAccessPoints = Array.from(new Map(accessPoints.map((point) => [point.bssid, point])).values());
       const parsedDevices = await collectAppleDevices(uniqueAccessPoints, includeAll);
-      const formatted = formatResults(parsedDevices, accessPoints, includeAll);
+      const formatted = await formatResults(parsedDevices, accessPoints, includeAll, reverseGeocode);
       const fallback = extractIpFallback(request.cf);
       if (!formatted.found && fallback) {
         formatted.fallback = fallback;
@@ -87,6 +87,7 @@ async function requestAppleDevices(accessPoints, includeAll) {
 async function extractParams(request) {
   const url = new URL(request.url);
   const includeAllQuery = parseBoolean(url.searchParams.get('all'));
+  const reverseGeocodeQuery = parseBoolean(url.searchParams.get('reverseGeocode'));
   const method = request.method.toUpperCase();
 
   if (method !== 'POST') {
@@ -97,6 +98,7 @@ async function extractParams(request) {
     return {
       accessPoints: [{ bssid, signal: null }],
       includeAll: includeAllQuery,
+      reverseGeocode: reverseGeocodeQuery,
     };
   }
 
@@ -107,6 +109,9 @@ async function extractParams(request) {
 
   const body = await request.json();
   const includeAllBody = typeof body.all !== 'undefined' ? parseBoolean(String(body.all)) : includeAllQuery;
+  const reverseGeocodeBody = typeof body.reverseGeocode !== 'undefined'
+    ? parseBoolean(String(body.reverseGeocode))
+    : reverseGeocodeQuery;
 
   if (Array.isArray(body.accessPoints) && body.accessPoints.length > 0) {
     const accessPoints = body.accessPoints.map((point, index) => {
@@ -118,13 +123,18 @@ async function extractParams(request) {
         signal: point.signal ?? null,
       };
     });
-    return { accessPoints, includeAll: includeAllBody };
+    return {
+      accessPoints,
+      includeAll: includeAllBody,
+      reverseGeocode: reverseGeocodeBody,
+    };
   }
 
   if (typeof body.bssid === 'string') {
     return {
       accessPoints: [{ bssid: body.bssid, signal: body.signal ?? null }],
       includeAll: includeAllBody,
+      reverseGeocode: reverseGeocodeBody,
     };
   }
 
@@ -363,7 +373,36 @@ function encodeVarint(value) {
   return bytes;
 }
 
-function formatResults(devices, requestedAccessPoints, includeAll) {
+async function reverseGeocode(latitude, longitude) {
+  try {
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`,
+      {
+        headers: {
+          'User-Agent': 'geolocate-worker/1.0',
+        },
+      }
+    );
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json();
+    if (data && data.display_name) {
+      return {
+        displayName: data.display_name,
+        address: data.address || {},
+      };
+    }
+  } catch (error) {
+    // Silently fail for reverse geocoding errors
+    console.warn('Reverse geocoding failed:', error.message);
+  }
+  return null;
+}
+
+async function formatResults(devices, requestedAccessPoints, includeAll, shouldReverseGeocode = false) {
   const requestedMap = new Map();
   for (const point of requestedAccessPoints) {
     const existing = requestedMap.get(point.bssid) ?? { signals: [] };
@@ -396,13 +435,23 @@ function formatResults(devices, requestedAccessPoints, includeAll) {
     const signals = requestEntry?.signals ?? [];
     const summary = summarizeSignals(signals);
 
-    aggregatedResults.push({
+    const result = {
       bssid: normalized,
       latitude,
       longitude,
       mapUrl: `https://www.google.com/maps/place/${latitude},${longitude}`,
       ...(summary ? summary : {}),
-    });
+    };
+
+    // Add reverse geocoding if requested
+    if (shouldReverseGeocode) {
+      const address = await reverseGeocode(latitude, longitude);
+      if (address) {
+        result.address = address;
+      }
+    }
+
+    aggregatedResults.push(result);
 
     const weight = signals.reduce((total, signal) => total + weightFromSignal(signal), 0);
     if (weight > 0) {

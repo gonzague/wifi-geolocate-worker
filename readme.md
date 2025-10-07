@@ -10,6 +10,7 @@
 - 📊 Summarises per-BSSID signal samples when provided
 - 🎯 Computes a weighted-centroid estimate when multiple signals are supplied
 - 🔄 Falls back to Cloudflare's IP-based geolocation when Apple returns nothing
+- 🗺️ Reverse geocoding - converts coordinates to human-readable addresses (optional)
 
 ## 📋 Prerequisites
 - **Node.js 18+** - Required to run Wrangler CLI. Install from [nodejs.org](https://nodejs.org/) or use a version manager like [Volta](https://volta.sh/) or [nvm](https://github.com/nvm-sh/nvm)
@@ -72,10 +73,11 @@ The deployment uses `wrangler.toml`, which points to `worker/index.js` and enabl
 ### 🌐 GET `/`
 Lookup a single access point by query string:
 ```
-GET https://<your-worker>.workers.dev/?bssid=34:DB:FD:43:E3:A1&all=true
+GET https://<your-worker>.workers.dev/?bssid=34:DB:FD:43:E3:A1&all=true&reverseGeocode=true
 ```
 - `bssid` (required): 12 hexadecimal characters with or without separators.
 - `all` (optional): Return every access point Apple responds with (`true`/`1`/`yes`). Defaults to `false`, which limits results to the requested BSSID(s).
+- `reverseGeocode` (optional): Convert coordinates to human-readable addresses (`true`/`1`/`yes`). Defaults to `false`.
 
 ### 📮 POST `/`
 Submit JSON to query multiple access points and optionally include received signal strength indicator (RSSI) values in dBm.
@@ -86,11 +88,13 @@ Submit JSON to query multiple access points and optionally include received sign
     { "bssid": "34:DB:FD:43:E3:B2", "signal": -60 },
     { "bssid": "34:DB:FD:40:01:10", "signal": -70 }
   ],
-  "all": false
+  "all": false,
+  "reverseGeocode": true
 }
 ```
 - `accessPoints` (required): Array of objects with `bssid` (string) and optional `signal` (number).
 - `all` (optional): Same behaviour as the query parameter.
+- `reverseGeocode` (optional): Convert coordinates to human-readable addresses (`true`/`1`/`yes`). Defaults to `false`.
 
 ### 📄 Response Shape
 A successful lookup returns JSON similar to:
@@ -112,7 +116,16 @@ A successful lookup returns JSON similar to:
       "signal": -52,
       "signalCount": 1,
       "signalMin": -52,
-      "signalMax": -52
+      "signalMax": -52,
+      "address": {
+        "displayName": "Champs-Élysées, Paris, Île-de-France, France",
+        "address": {
+          "road": "Champs-Élysées",
+          "city": "Paris",
+          "state": "Île-de-France",
+          "country": "France"
+        }
+      }
     }
   ],
   "triangulated": {
@@ -153,10 +166,12 @@ When Apple returns no usable coordinates, `found` is `false` and the response in
 
 - Validation failures return HTTP 400 with an `error` message.
 - Upstream problems with Apple result in HTTP 502 and an explanatory `error` payload.
+- `address` field is only included in results when `reverseGeocode=true` is specified.
 
 ## 📝 Data Notes
 - BSSIDs are normalised to lowercase colon-separated hex (e.g., `aa:bb:cc:dd:ee:ff`).
 - Signal values are interpreted as RSSI in dBm and clamped between -120 and -5 when computing weights.
+- Reverse geocoding uses OpenStreetMap's Nominatim API (free, no API keys required, 1 request/second rate limit).
 
 ## ⚠️ Caveats
 Apple's Wi-Fi positioning service is undocumented and may change without notice. Use this worker responsibly and respect local laws and Apple terms of service.
